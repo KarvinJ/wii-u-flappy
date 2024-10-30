@@ -160,7 +160,8 @@ void resetGame(Player &player)
 {
     if (score > highScore)
     {
-        saveScore();
+        highScore = score;
+        // saveScore();
     }
 
     // highScore = loadHighScore();
