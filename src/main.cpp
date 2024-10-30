@@ -4,59 +4,193 @@
 #include <unistd.h> // chdir header
 #include <romfs-wiiu.h>
 #include <whb/proc.h>
+#include <iostream>
+#include <vector>
+#include <fstream>
 
 SDL_Window *window = nullptr;
 SDL_Renderer *renderer = nullptr;
 SDL_GameController *controller = nullptr;
 
-const int PLAYER_SPEED = 600;
-
-Sprite playerSprite;
-
-Mix_Music *music = nullptr;
-Mix_Chunk *sound = nullptr;
-
+bool isGameOver;
 bool isGamePaused;
+float startGameTimer;
 
-SDL_Texture *pauseGameTexture = nullptr;
-SDL_Rect pauseGameBounds;
+bool shouldRotateUp = false;
+float downRotationTimer = 0;
+float upRotationTimer = 0;
 
-SDL_Texture *scoreTexture = nullptr;
-SDL_Rect scoreBounds;
+float gravity = 0;
 
-int score;
+Mix_Chunk *gamePausedSound = nullptr;
+Mix_Chunk *flapSound = nullptr;
+Mix_Chunk *pauseSound = nullptr;
+Mix_Chunk *dieSound = nullptr;
+Mix_Chunk *crossPipeSound = nullptr;
 
-TTF_Font *font = nullptr;
+SDL_Rect birdsBounds;
+Sprite birdSprites;
+Sprite playerSprite;
+Sprite startGameSprite;
+Sprite backgroundSprite;
+Sprite groundSprite;
 
-bool shouldCloseTheGame;
+Sprite upPipeSprite;
+Sprite downPipeSprite;
 
-SDL_Rect ball = {SCREEN_WIDTH / 2 + 50, SCREEN_HEIGHT / 2, 32, 32};
+std::vector<Sprite> numbers;
+std::vector<Sprite> numberTens;
+std::vector<Sprite> highScoreNumbers;
+std::vector<Sprite> highScoreNumberTens;
 
-int ballVelocityX = 400;
-int ballVelocityY = 400;
+typedef struct
+{
+    float y;
+    Sprite sprite;
+    float impulse;
+    float gravityIncrement;
+} Player;
 
-int colorIndex;
+Player player;
 
-SDL_Color colors[] = {
-    {128, 128, 128, 0}, // gray
-    {255, 255, 255, 0}, // white
-    {255, 0, 0, 0},     // red
-    {0, 255, 0, 0},     // green
-    {0, 0, 255, 0},     // blue
-    {255, 255, 0, 0},   // brown
-    {0, 255, 255, 0},   // cyan
-    {255, 0, 255, 0},   // purple
-};
+float groundYPosition;
+
+SDL_Rect groundCollisionBounds;
+
+SDL_Texture *highScoreTexture = nullptr;
+SDL_Rect highScoreBounds;
+
+TTF_Font *fontSquare = nullptr;
+
+SDL_Color fontColor = {255, 255, 255};
+
+int score = 0;
+float initialAngle = 0;
+int highScore;
+
+typedef struct
+{
+    float x;
+    float y;
+} Vector2;
+
+std::vector<Vector2> groundPositions;
+
+typedef struct
+{
+    float x;
+    Sprite sprite;
+    bool isBehind;
+    bool isDestroyed;
+} Pipe;
+
+std::vector<Pipe> pipes;
+
+float lastPipeSpawnTime;
+
+void generatePipes()
+{
+    int upPipePosition = rand() % 220;
+
+    upPipePosition *= -1;
+
+    SDL_Rect upPipeBounds = {SCREEN_WIDTH, upPipePosition, upPipeSprite.textureBounds.w, upPipeSprite.textureBounds.h};
+
+    Sprite upSprite = {upPipeSprite.texture, upPipeBounds};
+
+    Pipe upPipe = {SCREEN_WIDTH, upSprite, false, false};
+
+    // gap size = 80.
+    int downPipePosition = upPipePosition + upPipeSprite.textureBounds.h + 80;
+
+    SDL_Rect downPipeBounds = {SCREEN_WIDTH, downPipePosition, downPipeSprite.textureBounds.w, downPipeSprite.textureBounds.h};
+
+    Sprite downSprite = {downPipeSprite.texture, downPipeBounds};
+
+    Pipe downPipe = {SCREEN_WIDTH, downSprite, false, false};
+
+    pipes.push_back(upPipe);
+    pipes.push_back(downPipe);
+
+    lastPipeSpawnTime = 0;
+}
+
+void saveScore()
+{
+    std::ofstream highScores("high-score.txt");
+
+    std::string scoreString = std::to_string(score);
+    highScores << scoreString;
+
+    highScores.close();
+}
+
+int loadHighScore()
+{
+    std::string highScoreText;
+
+    std::ifstream highScores("high-score.txt");
+
+    if (!highScores.is_open())
+    {
+        saveScore();
+
+        std::ifstream auxHighScores("high-score.txt");
+
+        getline(auxHighScores, highScoreText);
+
+        // Close the file
+        highScores.close();
+
+        int highScore = stoi(highScoreText);
+
+        return highScore;
+    }
+
+    getline(highScores, highScoreText);
+
+    highScores.close();
+
+    int highScore = stoi(highScoreText);
+
+    return highScore;
+}
+
+void resetGame(Player &player)
+{
+    if (score > highScore)
+    {
+        saveScore();
+    }
+
+    // highScore = loadHighScore();
+
+    isGameOver = false;
+    startGameTimer = 0;
+    score = 0;
+    startGameTimer = 0;
+    initialAngle = 0;
+    player.y = SCREEN_HEIGHT / 2;
+    player.sprite.textureBounds.x = SCREEN_WIDTH / 2;
+    player.sprite.textureBounds.y = SCREEN_HEIGHT / 2;
+    gravity = 0;
+    pipes.clear();
+}
 
 void quitGame()
 {
+    Mix_FreeChunk(flapSound);
+    SDL_DestroyTexture(playerSprite.texture);
+    SDL_DestroyTexture(highScoreTexture);
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
+    Mix_CloseAudio();
+    IMG_Quit();
+    TTF_Quit();
     SDL_Quit();
-    WHBProcShutdown();
 }
 
-void handleEvents()
+void handleEvents(float deltaTime)
 {
     SDL_Event event;
 
@@ -64,86 +198,109 @@ void handleEvents()
     {
         if (event.type == SDL_QUIT)
         {
-            shouldCloseTheGame = true;
-            break;
+            quitGame();
+            exit(0);
         }
 
-        if (event.type == SDL_JOYBUTTONDOWN)
+        if (event.type == SDL_CONTROLLERBUTTONDOWN && event.cbutton.button == SDL_CONTROLLER_BUTTON_DPAD_LEFT)
         {
-            if (event.jbutton.button == BUTTON_MINUS)
-            {
-                shouldCloseTheGame = true;
-                break;
-            }
+            isGamePaused = !isGamePaused;
+            Mix_PlayChannel(-1, gamePausedSound, 0);
+        }
 
-            if (event.jbutton.button == BUTTON_PLUS)
-            {
-                isGamePaused = !isGamePaused;
-                Mix_PlayChannel(-1, sound, 0);
-            }
+        if (!isGameOver && event.type == SDL_CONTROLLERBUTTONDOWN && event.cbutton.button == SDL_CONTROLLER_BUTTON_A)
+        {
+            gravity = player.impulse * deltaTime;
+
+            shouldRotateUp = true;
+            upRotationTimer = 1;
+            downRotationTimer = 0;
+            initialAngle = -20;
+
+            Mix_PlayChannel(-1, flapSound, 0);
+        }
+
+        else if (isGameOver && event.type == SDL_CONTROLLERBUTTONDOWN && event.cbutton.button == SDL_CONTROLLER_BUTTON_A)
+        {
+            resetGame(player);
         }
     }
-}
-
-int rand_range(int min, int max)
-{
-    return min + rand() / (RAND_MAX / (max - min + 1) + 1);
 }
 
 void update(float deltaTime)
 {
-    if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_DPAD_UP) && playerSprite.textureBounds.y > 0)
+    startGameTimer += deltaTime;
+
+    lastPipeSpawnTime += deltaTime;
+
+    if (lastPipeSpawnTime >= 2)
     {
-        playerSprite.textureBounds.y -= PLAYER_SPEED * deltaTime;
+        generatePipes();
     }
 
-    else if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_DPAD_DOWN) && playerSprite.textureBounds.y < SCREEN_HEIGHT - playerSprite.textureBounds.h)
+    if (player.y < -player.sprite.textureBounds.h)
     {
-        playerSprite.textureBounds.y += PLAYER_SPEED * deltaTime;
+        isGameOver = true;
     }
 
-    else if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_DPAD_LEFT) && playerSprite.textureBounds.x > 0)
+    if (startGameTimer > 1)
     {
-        playerSprite.textureBounds.x -= PLAYER_SPEED * deltaTime;
+        player.y += gravity * deltaTime;
+        player.sprite.textureBounds.y = player.y;
+        gravity += player.gravityIncrement * deltaTime;
     }
 
-    else if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_DPAD_RIGHT) && playerSprite.textureBounds.x < SCREEN_WIDTH - playerSprite.textureBounds.w)
+    if (SDL_HasIntersection(&player.sprite.textureBounds, &groundCollisionBounds))
     {
-        playerSprite.textureBounds.x += PLAYER_SPEED * deltaTime;
+        isGameOver = true;
+        Mix_PlayChannel(-1, dieSound, 0);
     }
 
-    if (ball.x < 0 || ball.x > SCREEN_WIDTH - ball.w)
+    for (Vector2 &groundPosition : groundPositions)
     {
-        ballVelocityX *= -1;
+        groundPosition.x -= 150 * deltaTime;
 
-        colorIndex = rand_range(0, 5);
+        if (groundPosition.x < -groundSprite.textureBounds.w)
+        {
+            groundPosition.x = groundSprite.textureBounds.w * 3;
+        }
     }
 
-    else if (ball.y < 0 || ball.y > SCREEN_HEIGHT - ball.h)
+    for (auto actualPipe = pipes.begin(); actualPipe != pipes.end();)
     {
-        ballVelocityY *= -1;
+        if (!actualPipe->isDestroyed)
+        {
+            actualPipe->x -= 150 * deltaTime;
+            actualPipe->sprite.textureBounds.x = actualPipe->x;
+        }
 
-        colorIndex = rand_range(0, 5);
+        if (SDL_HasIntersection(&player.sprite.textureBounds, &actualPipe->sprite.textureBounds))
+        {
+            isGameOver = true;
+            Mix_PlayChannel(-1, dieSound, 0);
+        }
+
+        if (!actualPipe->isBehind && player.sprite.textureBounds.x > actualPipe->sprite.textureBounds.x)
+        {
+            actualPipe->isBehind = true;
+
+            if (actualPipe->sprite.textureBounds.y < player.sprite.textureBounds.y)
+            {
+                score++;
+                Mix_PlayChannel(-1, crossPipeSound, 0);
+            }
+        }
+
+        if (actualPipe->sprite.textureBounds.x < -actualPipe->sprite.textureBounds.w)
+        {
+            actualPipe->isDestroyed = true;
+            pipes.erase(actualPipe);
+        }
+        else
+        {
+            actualPipe++;
+        }
     }
-
-    else if (SDL_HasIntersection(&playerSprite.textureBounds, &ball))
-    {
-        ballVelocityX *= -1;
-        ballVelocityY *= -1;
-
-        colorIndex = rand_range(0, 5);
-
-        Mix_PlayChannel(-1, sound, 0);
-
-        score++;
-
-        std::string scoreString = "SCORE: " + std::to_string(score);
-
-        updateTextureText(scoreTexture, scoreString.c_str(), font, renderer);
-    }
-
-    ball.x += ballVelocityX * deltaTime;
-    ball.y += ballVelocityY * deltaTime;
 }
 
 void renderSprite(Sprite &sprite)
@@ -151,28 +308,151 @@ void renderSprite(Sprite &sprite)
     SDL_RenderCopy(renderer, sprite.texture, NULL, &sprite.textureBounds);
 }
 
-void render()
+void render(float deltaTime)
 {
-    SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
-    SDL_RenderClear(renderer);
+    backgroundSprite.textureBounds.x = 0;
+    renderSprite(backgroundSprite);
 
-    SDL_SetRenderDrawColor(renderer, colors[colorIndex].r, colors[colorIndex].g, colors[colorIndex].b, 255);
+    backgroundSprite.textureBounds.x = backgroundSprite.textureBounds.w;
+    renderSprite(backgroundSprite);
 
-    SDL_RenderFillRect(renderer, &ball);
+    backgroundSprite.textureBounds.x = backgroundSprite.textureBounds.w * 2;
+    renderSprite(backgroundSprite);
 
-    renderSprite(playerSprite);
+    backgroundSprite.textureBounds.x = backgroundSprite.textureBounds.w * 3;
+    renderSprite(backgroundSprite);
 
-    if (isGamePaused)
+    groundSprite.textureBounds.x = 0;
+    renderSprite(groundSprite);
+
+    groundSprite.textureBounds.x = groundSprite.textureBounds.w;
+    renderSprite(groundSprite);
+
+    groundSprite.textureBounds.x = groundSprite.textureBounds.w * 2;
+    renderSprite(groundSprite);
+
+    groundSprite.textureBounds.x = groundSprite.textureBounds.w * 3;
+    renderSprite(groundSprite);
+
+    for (Pipe &pipe : pipes)
     {
-        SDL_RenderCopy(renderer, pauseGameTexture, NULL, &pauseGameBounds);
+        if (!pipe.isDestroyed)
+        {
+            renderSprite(pipe.sprite);
+        }
     }
 
-    SDL_QueryTexture(scoreTexture, NULL, NULL, &scoreBounds.w, &scoreBounds.h);
-    scoreBounds.x = SCREEN_WIDTH / 2 - pauseGameBounds.w / 2;
-    scoreBounds.y = scoreBounds.h / 2;
-    SDL_RenderCopy(renderer, scoreTexture, NULL, &scoreBounds);
+    if (highScore < 10)
+    {
+        highScoreNumbers[highScore].textureBounds.x = 320;
+        renderSprite(highScoreNumbers[highScore]);
+    }
+    else
+    {
+        int tens = (int)(highScore / 10);
+        int units = (int)(highScore % 10);
+
+        highScoreNumberTens[tens].textureBounds.x = 300;
+        highScoreNumbers[units].textureBounds.x = 320;
+
+        renderSprite(highScoreNumberTens[tens]);
+        renderSprite(highScoreNumbers[units]);
+    }
+
+    if (score < 10)
+    {
+        renderSprite(numbers[score]);
+    }
+    else
+    {
+        int tens = (int)(score / 10);
+        int units = (score % 10);
+
+        numberTens[tens].textureBounds.x = SCREEN_WIDTH / 2 - 20;
+
+        renderSprite(numberTens[tens]);
+        renderSprite(numbers[units]);
+    }
+
+    SDL_RenderCopy(renderer, highScoreTexture, NULL, &highScoreBounds);
+
+    for (Vector2 &groundPosition : groundPositions)
+    {
+        groundSprite.textureBounds.x = groundPosition.x;
+        renderSprite(groundSprite);
+    }
+
+    if (isGameOver)
+    {
+        renderSprite(startGameSprite);
+    }
+
+    SDL_RenderCopyEx(renderer, birdSprites.texture, &birdsBounds, &player.sprite.textureBounds, initialAngle, NULL, SDL_FLIP_NONE);
+
+    if (startGameTimer > 1)
+    {
+        downRotationTimer += deltaTime;
+
+        if (downRotationTimer < 0.5f)
+        {
+            SDL_RenderCopyEx(renderer, birdSprites.texture, &birdsBounds, &player.sprite.textureBounds, initialAngle, NULL, SDL_FLIP_NONE);
+        }
+
+        if (shouldRotateUp)
+        {
+            if (upRotationTimer > 0)
+            {
+                upRotationTimer -= deltaTime;
+            }
+
+            if (upRotationTimer <= 0)
+            {
+                shouldRotateUp = false;
+            }
+
+            SDL_RenderCopyEx(renderer, birdSprites.texture, &birdsBounds, &player.sprite.textureBounds, initialAngle, NULL, SDL_FLIP_NONE);
+        }
+
+        if (downRotationTimer > 0.5f)
+        {
+            if (initialAngle <= 90 && !isGameOver && !isGamePaused)
+            {
+                initialAngle += 2;
+            }
+
+            SDL_RenderCopyEx(renderer, birdSprites.texture, &birdsBounds, &player.sprite.textureBounds, initialAngle, NULL, SDL_FLIP_NONE);
+        }
+    }
+    else
+    {
+        SDL_RenderCopyEx(renderer, birdSprites.texture, &birdsBounds, &player.sprite.textureBounds, initialAngle, NULL, SDL_FLIP_NONE);
+    }
 
     SDL_RenderPresent(renderer);
+}
+
+void loadNumbersSprites()
+{
+    std::string fileExtension = ".png";
+
+    numbers.reserve(10);
+    numberTens.reserve(10);
+
+    highScoreNumbers.reserve(10);
+    highScoreNumberTens.reserve(10);
+
+    for (int i = 0; i < 10; i++)
+    {
+        std::string completeString = "sprites/" + std::to_string(i) + fileExtension;
+
+        Sprite numberSprite = loadSprite(renderer, completeString.c_str(), SCREEN_WIDTH / 2, 30);
+
+        numbers.push_back(numberSprite);
+        numberTens.push_back(numberSprite);
+
+        highScoreNumbers.push_back(numberSprite);
+        highScoreNumberTens.push_back(numberSprite);
+    }
 }
 
 int main(int argc, char **argv)
@@ -181,7 +461,7 @@ int main(int argc, char **argv)
     romfsInit();
     chdir("romfs:/");
 
-    window = SDL_CreateWindow("Wii U SDL Starter", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, SCREEN_WIDTH, SCREEN_HEIGHT, SDL_WINDOW_SHOWN);
+    window = SDL_CreateWindow("flappy", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, SCREEN_WIDTH, SCREEN_HEIGHT, SDL_WINDOW_SHOWN);
     renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
 
     if (startSDL(window, renderer) > 0)
@@ -192,64 +472,91 @@ int main(int argc, char **argv)
     SDL_JoystickEventState(SDL_ENABLE);
     SDL_JoystickOpen(0);
 
-    if (SDL_NumJoysticks() < 1)
-    {
-        printf("No game controllers connected!\n");
-        return -1;
-    }
-    else
-    {
-        controller = SDL_GameControllerOpen(0);
-        if (controller == NULL)
-        {
-            printf("Unable to open game controller! SDL Error: %s\n", SDL_GetError());
-            return -1;
-        }
-    }
+    controller = SDL_GameControllerOpen(0);
 
-    playerSprite = loadSprite(renderer, "sprites/alien_1.png", SCREEN_WIDTH / 2 - 100, SCREEN_HEIGHT / 2);
+    fontSquare = TTF_OpenFont("fonts/square_sans_serif_7.ttf", 36);
 
-    font = TTF_OpenFont("fonts/LeroyLetteringLightBeta01.ttf", 36);
+    updateTextureText(highScoreTexture, "High Score: ", fontSquare, renderer);
 
-    // render text as texture
-    updateTextureText(scoreTexture, "SCORE: 0", font, renderer);
+    SDL_QueryTexture(highScoreTexture, NULL, NULL, &highScoreBounds.w, &highScoreBounds.h);
+    highScoreBounds.x = 20;
+    highScoreBounds.y = 30;
 
-    updateTextureText(pauseGameTexture, "GAME PAUSED", font, renderer);
+    gamePausedSound = loadSound("sounds/magic.wav");
+    flapSound = loadSound("sounds/wing.wav");
+    pauseSound = loadSound("sounds/magic.wav");
+    dieSound = loadSound("sounds/die.wav");
+    crossPipeSound = loadSound("sounds/point.wav");
 
-    SDL_QueryTexture(pauseGameTexture, NULL, NULL, &pauseGameBounds.w, &pauseGameBounds.h);
-    pauseGameBounds.x = SCREEN_WIDTH / 2 - pauseGameBounds.w / 2;
-    pauseGameBounds.y = 200;
+    // highScore = loadHighScore();
 
-    // no need to keep the font loaded
-    // TTF_CloseFont(font);
+    upPipeSprite = loadSprite(renderer, "sprites/pipe-green-180.png", SCREEN_WIDTH / 2, -220);
+    downPipeSprite = loadSprite(renderer, "sprites/pipe-green.png", SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2);
 
-    // load music and sounds from files
-    sound = loadSound("sounds/pop1.wav");
+    startGameSprite = loadSprite(renderer, "sprites/message.png", SCREEN_WIDTH / 2 - 75, 103);
+    backgroundSprite = loadSprite(renderer, "sprites/background-day.png", 0, 0);
 
-    music = loadMusic("music/background.ogg");
+    groundSprite = loadSprite(renderer, "sprites/base.png", 0, 0);
 
-    Mix_PlayMusic(music, -1);
+    groundYPosition = SCREEN_HEIGHT - groundSprite.textureBounds.h;
+
+    groundSprite.textureBounds.y = groundYPosition;
+
+    groundCollisionBounds = {0, (int)groundYPosition, SCREEN_HEIGHT, groundSprite.textureBounds.h};
+
+    groundPositions.push_back({0, groundYPosition});
+    groundPositions.push_back({(float)groundSprite.textureBounds.w, groundYPosition});
+    groundPositions.push_back({(float)groundSprite.textureBounds.w * 2, groundYPosition});
+    groundPositions.push_back({(float)groundSprite.textureBounds.w * 3, groundYPosition});
+
+    playerSprite = loadSprite(renderer, "sprites/yellowbird-midflap.png", SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2);
+
+    player = Player{SCREEN_HEIGHT / 2, playerSprite, -10000, 400};
+
+    loadNumbersSprites();
+
+    birdSprites = loadSprite(renderer, "sprites/yellow-bird.png", SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2);
+
+    birdsBounds = {0, 0, birdSprites.textureBounds.w / 3, birdSprites.textureBounds.h};
+
+    int framesCounter = 0;
+    int framesSpeed = 6;
+
+    int currentFrame = 0;
 
     Uint32 previousFrameTime = SDL_GetTicks();
     Uint32 currentFrameTime = previousFrameTime;
     float deltaTime = 0.0f;
 
-    while (!shouldCloseTheGame && WHBProcIsRunning())
+    srand(time(NULL));
+
+    while (WHBProcIsRunning())
     {
         currentFrameTime = SDL_GetTicks();
         deltaTime = (currentFrameTime - previousFrameTime) / 1000.0f;
         previousFrameTime = currentFrameTime;
 
-        SDL_GameControllerUpdate();
+        handleEvents(deltaTime);
 
-        handleEvents();
-
-        if (!isGamePaused)
+        if (!isGameOver && !isGamePaused)
         {
+            framesCounter++;
+
+            if (framesCounter >= (60 / framesSpeed))
+            {
+                framesCounter = 0;
+                currentFrame++;
+
+                if (currentFrame > 2)
+                    currentFrame = 0;
+
+                birdsBounds.x = currentFrame * birdsBounds.w;
+            }
+
             update(deltaTime);
         }
 
-        render();
+        render(deltaTime);
     }
 
     quitGame();

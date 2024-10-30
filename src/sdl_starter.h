@@ -21,7 +21,7 @@
 #define BUTTON_DOWN 15
 #define BUTTON_COUNT 16
 
-const int SCREEN_WIDTH = 1280;
-const int SCREEN_HEIGHT = 720;
+const int SCREEN_WIDTH = 960;
+const int SCREEN_HEIGHT = 544;
 
 int startSDL(SDL_Window *window, SDL_Renderer *renderer);
